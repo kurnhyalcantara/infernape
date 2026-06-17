@@ -1,4 +1,7 @@
 services:
+  # ---------------------------------------------------------------------------
+  # Application data plane (shared by all Koer microservices)
+  # ---------------------------------------------------------------------------
   postgres:
     image: postgres:16-alpine
     container_name: koer-postgres
@@ -42,11 +45,129 @@ services:
     networks:
       - koer-network
 
+  # ---------------------------------------------------------------------------
+  # Kong control plane (dedicated Postgres — isolated from application data)
+  # ---------------------------------------------------------------------------
+  kong-database:
+    image: postgres:16-alpine
+    container_name: koer-kong-db
+    # No host port: Kong's control-plane state stays internal to koer-network.
+    environment:
+      POSTGRES_USER: ${KONG_PG_USER:-kong}
+      POSTGRES_PASSWORD: ${KONG_PG_PASSWORD:-kongpass}
+      POSTGRES_DB: ${KONG_PG_DATABASE:-kong}
+    volumes:
+      - kong_db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${KONG_PG_USER:-kong}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    networks:
+      - koer-network
+
+  # One-shot: bootstrap / migrate the Kong database, then exit.
+  kong-migrations:
+    image: kong:${KONG_VERSION:-3.9}
+    container_name: koer-kong-migrations
+    command: kong migrations bootstrap
+    environment:
+      KONG_DATABASE: postgres
+      KONG_PG_HOST: koer-kong-db
+      KONG_PG_USER: ${KONG_PG_USER:-kong}
+      KONG_PG_PASSWORD: ${KONG_PG_PASSWORD:-kongpass}
+      KONG_PG_DATABASE: ${KONG_PG_DATABASE:-kong}
+    depends_on:
+      kong-database:
+        condition: service_healthy
+    restart: on-failure
+    networks:
+      - koer-network
+
+  # ---------------------------------------------------------------------------
+  # Kong Gateway (OSS) + Kong Manager (OSS, served on :8002 by the same image)
+  # ---------------------------------------------------------------------------
+  kong:
+    image: kong:${KONG_VERSION:-3.9}
+    container_name: koer-kong
+    environment:
+      KONG_DATABASE: postgres
+      KONG_PG_HOST: koer-kong-db
+      KONG_PG_USER: ${KONG_PG_USER:-kong}
+      KONG_PG_PASSWORD: ${KONG_PG_PASSWORD:-kongpass}
+      KONG_PG_DATABASE: ${KONG_PG_DATABASE:-kong}
+      # Proxy (data plane) + Admin API (control plane) + Manager (GUI).
+      KONG_PROXY_LISTEN: "0.0.0.0:8000, 0.0.0.0:8443 ssl"
+      KONG_ADMIN_LISTEN: "0.0.0.0:8001"
+      KONG_ADMIN_GUI_LISTEN: "0.0.0.0:8002"
+      KONG_ADMIN_GUI_URL: "http://localhost:${KONG_MANAGER_PORT:-8002}"
+      # Send logs to the container stdout/stderr.
+      KONG_PROXY_ACCESS_LOG: /dev/stdout
+      KONG_ADMIN_ACCESS_LOG: /dev/stdout
+      KONG_PROXY_ERROR_LOG: /dev/stderr
+      KONG_ADMIN_ERROR_LOG: /dev/stderr
+      # Enable the bundled plugins plus our custom forward-auth plugin.
+      KONG_PLUGINS: "bundled,forward-auth"
+    volumes:
+      # Mount the custom plugin into Kong's default Lua plugin path (read-only).
+      - ./kong/plugins/forward-auth:/usr/local/share/lua/5.1/kong/plugins/forward-auth:ro
+    ports:
+      - "${KONG_PROXY_PORT:-8000}:8000"
+      - "${KONG_PROXY_SSL_PORT:-8443}:8443"
+      # Admin API bound to loopback only — never expose the control plane.
+      - "127.0.0.1:${KONG_ADMIN_PORT:-8001}:8001"
+      - "${KONG_MANAGER_PORT:-8002}:8002"
+    healthcheck:
+      test: ["CMD", "kong", "health"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    depends_on:
+      kong-database:
+        condition: service_healthy
+      kong-migrations:
+        condition: service_completed_successfully
+    restart: unless-stopped
+    networks:
+      - koer-network
+
+  # One-shot: sync the Git baseline (services/routes/plugins) into Kong, then
+  # exit. --select-tag baseline means decK only manages baseline-tagged entities,
+  # so manual changes made in Kong Manager survive re-syncs (Hybrid strategy).
+  kong-deck:
+    image: kong/deck:latest
+    container_name: koer-kong-deck
+    command: ["gateway", "sync", "/config/kong.yaml", "--kong-addr", "http://koer-kong:8001", "--select-tag", "baseline"]
+    volumes:
+      - ./kong/kong.yaml:/config/kong.yaml:ro
+    depends_on:
+      kong:
+        condition: service_healthy
+    restart: on-failure
+    networks:
+      - koer-network
+
+  # ---------------------------------------------------------------------------
+  # Demo upstream (opt-in): `docker compose --profile demo up -d`
+  # Reflects request headers back so injected X-User-* headers are visible.
+  # ---------------------------------------------------------------------------
+  echo:
+    image: mendhak/http-https-echo:latest
+    container_name: koer-echo
+    environment:
+      HTTP_PORT: 8080
+    profiles: [demo]
+    restart: unless-stopped
+    networks:
+      - koer-network
 
 volumes:
   postgres_data:
     driver: local
   redis_data:
+    driver: local
+  kong_db_data:
     driver: local
 
 networks:

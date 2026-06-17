@@ -1,0 +1,82 @@
+# Kong baseline (decK) — the Git source of truth for the gateway.
+#
+# Applied to the running Kong (DB mode) via `deck gateway sync` with
+# `--select-tag baseline`, so decK only manages entities tagged `baseline`.
+# Anything developers create ad-hoc in Kong Manager is left untouched.
+#
+# Routing: path-based with strip_path (e.g. /api/product/foo -> upstream /foo).
+# Discovery: Docker DNS — upstreams are referenced by container name on
+# the shared `koer-network`.
+_format_version: "3.0"
+
+services:
+  # Public auth endpoints (login / refresh / etc). NO forward-auth here —
+  # these are the endpoints that issue tokens in the first place.
+  - name: auth-service
+    url: http://araquanid:8080
+    tags: [baseline]
+    routes:
+      - name: auth-route
+        paths: [/api/auth]
+        strip_path: true
+        tags: [baseline]
+
+  # Protected business service. forward-auth verifies the token via araquanid
+  # and injects X-User-* headers before proxying upstream.
+  - name: product-service
+    url: http://koer-product-service:8080
+    tags: [baseline]
+    routes:
+      - name: product-route
+        paths: [/api/product]
+        strip_path: true
+        tags: [baseline]
+    plugins:
+      - name: forward-auth
+        tags: [baseline]
+        config:
+          auth_url: http://araquanid:8080/auth/verify
+
+  - name: task-service
+    url: http://koer-task-service:8080
+    tags: [baseline]
+    routes:
+      - name: task-route
+        paths: [/api/task]
+        strip_path: true
+        tags: [baseline]
+    plugins:
+      - name: forward-auth
+        tags: [baseline]
+        config:
+          auth_url: http://araquanid:8080/auth/verify
+
+  # Demo upstream (only routes traffic when the `demo` Compose profile is up).
+  # Echoes request headers back so you can SEE the injected identity headers.
+  - name: echo-service
+    url: http://koer-echo:8080
+    tags: [baseline]
+    routes:
+      - name: echo-route
+        paths: [/api/echo]
+        strip_path: true
+        tags: [baseline]
+    plugins:
+      - name: forward-auth
+        tags: [baseline]
+        config:
+          auth_url: http://araquanid:8080/auth/verify
+
+plugins:
+  # Defense-in-depth: globally strip client-supplied identity headers so they
+  # can never reach an upstream even on an unprotected route. forward-auth also
+  # clears them per-request before injecting trusted values.
+  - name: request-transformer
+    tags: [baseline]
+    config:
+      remove:
+        headers:
+          - X-User-ID
+          - X-User-Email
+          - X-User-Role
+          - X-User-Permissions
