@@ -21,6 +21,19 @@ services:
         strip_path: true
         tags: [baseline]
 
+  # temtem session service. Public like auth-service — it issues/validates its
+  # OWN JWTs (CreateSession/RefreshSession mint tokens; GetSession/RevokeSession
+  # are guarded by temtem's own middleware), so NO forward-auth here. Kong just
+  # forwards the Authorization header. REST grpc-gateway listens on :8080.
+  - name: session-service
+    url: http://temtem:8080
+    tags: [baseline]
+    routes:
+      - name: session-route
+        paths: [/api/session]
+        strip_path: true
+        tags: [baseline]
+
   # Protected business service. forward-auth verifies the token via araquanid
   # and injects X-User-* headers before proxying upstream.
   - name: product-service
