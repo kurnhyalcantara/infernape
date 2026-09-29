@@ -7,7 +7,7 @@ set -e
 # Databases are specified via the POSTGRES_DATABASES environment variable
 # as a comma-separated list. If not set, defaults are used.
 
-DATABASES="${POSTGRES_DATABASES:-araquanid,koer_cash_management,koer_product,koer_task,koer_tax}"
+DATABASES="${POSTGRES_DATABASES}"
 
 echo "=== Initializing databases ==="
 
